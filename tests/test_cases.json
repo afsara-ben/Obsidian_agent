@@ -1,0 +1,19 @@
+[
+  {
+    "id": "T1",
+    "description": "Open Obsidian, create a new Vault named 'InternVault', and enter the vault.",
+    "expected_outcome": "pass",
+    "notes": "Happy path vault creation.",
+    "script": [
+      {"action": "wait", "detail": {"seconds": 1}, "comment": "Let emulator settle"},
+      {
+        "action": "start_app",
+        "detail": {"package": "md.obsidian", "activity": ".MainActivity"},
+        "comment": "Launch Obsidian"
+      },
+      {"action": "wait", "detail": {"seconds": 3}},
+      {"action": "wait", "detail": {"seconds": 0.5}, "comment": "Let state detection capture screenshot via planner."}
+    ]
+  }
+]
+
