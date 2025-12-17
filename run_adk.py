@@ -287,11 +287,22 @@ def main() -> None:
 
         for step_idx in range(args.max_steps):
             observation = capture_observation(executor.adb, step_idx)
+            
+            # Get both heuristic and vision-based states
+            heuristic_state = observation.get("state", "unknown")
             observation["visual_state"] = classify_screen(screen_classifier, Path(observation["screenshot_path"]))
-            # If we confidently classify the screen, propagate it to state for planning.
-            if observation.get("visual_state") and observation["visual_state"] != "unknown":
+            
+            # Prefer heuristic state if it's a known state (XML parsing is more accurate)
+            known_states = ["vault_splash", "vault_config", "continue_prompt", "editor"]
+            if heuristic_state in known_states:
+                print(f"visual_state: {observation['visual_state']} (using heuristic: {heuristic_state})")
+                observation["state"] = heuristic_state
+            # Otherwise use vision classification
+            elif observation.get("visual_state") and observation["visual_state"] != "unknown":
+                print(f"visual_state: {observation['visual_state']} (overriding heuristic: {heuristic_state})")
                 observation["state"] = observation["visual_state"]
-            print(f"visual_state: {observation['visual_state']}")
+            else:
+                print(f"visual_state: {observation['visual_state']} (keeping heuristic: {heuristic_state})")
             print(
                 f"[obs {step_idx}] state={observation.get('state')} visual={observation.get('visual_state')} "
                 f"screenshot={observation.get('screenshot_path')} dump={observation.get('dump_path')}"

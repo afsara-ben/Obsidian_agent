@@ -341,15 +341,16 @@ def plan_with_adk(planner: LlmAgent, test_case: Dict[str, Any], observation: Dic
     print(f"plan_with_adk: HYBRID MODE - state={current_state}")
     
     # Heuristic planning for known states
-    if current_state == "create_vault_splash":
+    # Map both heuristic names (vault_splash) and vision names (create_vault_splash)
+    if current_state in ["create_vault_splash", "vault_splash"]:
         print("plan_with_adk: HEURISTIC → tap 'Create a vault'")
         return [{"action": "tap_text", "detail": {"text": "Create a vault"}, "comment": "Initiate vault creation"}]
     
-    elif current_state == "sync_dialog":
+    elif current_state in ["sync_dialog", "continue_prompt"]:
         print("plan_with_adk: HEURISTIC → tap 'Continue without sync'")
         return [{"action": "tap_text", "detail": {"text": "Continue without sync"}, "comment": "Skip sync setup"}]
     
-    elif current_state == "storage_config":
+    elif current_state in ["storage_config", "vault_config"]:
         print("plan_with_adk: HEURISTIC → configure vault")
         goal = test_case.get("description", "")
         vault_name = "InternVault"  # Default name
@@ -361,12 +362,13 @@ def plan_with_adk(planner: LlmAgent, test_case: Dict[str, Any], observation: Dic
             if match:
                 vault_name = match.group(1)
         
+        # Enter vault name: tap field at correct coordinates (EditText at y_norm=0.283), then type
         return [
-            {"action": "tap", "detail": {"x_norm": 0.5, "y_norm": 0.25}, "comment": "Focus vault name field"},
+            {"action": "tap", "detail": {"x_norm": 0.5, "y_norm": 0.283}, "comment": "Focus vault name textfield"},
             {"action": "input_text", "detail": {"text": vault_name}, "comment": f"Enter vault name '{vault_name}'"},
             {"action": "tap_text", "detail": {"text": "Device storage"}, "comment": "Select device storage"},
             {"action": "wait", "detail": {"seconds": 0.5}, "comment": "Wait after selection"},
-            {"action": "tap_text", "detail": {"text": "Create"}, "comment": "Finalize vault creation"},
+            {"action": "tap_text", "detail": {"text": "Create a vault"}, "comment": "Tap create button"},
         ]
     
     elif current_state == "editor":
@@ -399,6 +401,9 @@ def plan_with_adk(planner: LlmAgent, test_case: Dict[str, Any], observation: Dic
     
     print(f"plan_with_adk: prompt={prompt[:200]}...")
     try:
+        # Get model name from planner
+        model_obj = getattr(planner, "model", "ollama/moondream")
+        model_name = getattr(model_obj, "model", model_obj)  # LiteLlm.model or plain str
         text: Optional[str] = None
 
         # Prefer local Ollama when requested (e.g., "ollama/qwen2.5vl:7b")

@@ -32,8 +32,8 @@ def build_screen_classifier(model: str = "ollama/moondream") -> LlmAgent:
         name="screen_classifier",
         model=model_obj,
         instruction=(
-            "Describe what you see on this mobile app screen. "
-            "What buttons, text, or UI elements are visible?"
+            "Describe this mobile app screen. List the main heading text, "
+            "input fields, and buttons you see."
         ),
     )
 
@@ -154,19 +154,23 @@ def classify_screen(classifier: LlmAgent, screenshot_path: Path) -> str:
     text = _call_model_with_instruction(str(model), str(instruction), prompt)
     if text:
         print(f"classify_screen raw response (REST): {text[:200]}")
-        # Map description keywords to states
+        # Map description keywords to states (order matters - most specific first!)
         text_lower = text.lower()
-        # Vault splash: mentions vault + button/purple (initial screen)
-        if ("vault" in text_lower and ("button" in text_lower or "purple" in text_lower)) or \
-           ("create" in text_lower and "vault" in text_lower):
-            result = "create_vault_splash"
-        # Sync dialog: mentions sync or continue
-        elif "sync" in text_lower or "continue without" in text_lower or "continue" in text_lower:
-            result = "sync_dialog"
-        # Storage config: mentions storage or configuration fields
-        elif "storage" in text_lower or "vault name" in text_lower or "device storage" in text_lower or \
-             ("name" in text_lower and "field" in text_lower):
+        
+        # Storage config: MUST check first (has "configure", "storage", "vault name")
+        if ("configure" in text_lower and "vault" in text_lower) or \
+           ("storage" in text_lower and ("device" in text_lower or "app" in text_lower)) or \
+           ("vault name" in text_lower) or \
+           ("vault location" in text_lower):
             result = "storage_config"
+        # Sync dialog: mentions sync or continue
+        elif "sync" in text_lower or "continue without" in text_lower:
+            result = "sync_dialog"
+        # Vault splash: mentions vault + button/purple (initial screen with "Your thoughts")
+        elif ("thoughts" in text_lower and "vault" in text_lower) or \
+             ("your thoughts are yours" in text_lower) or \
+             ("vault" in text_lower and "purple" in text_lower and "button" in text_lower):
+            result = "create_vault_splash"
         # Editor: mentions editing, notes, markdown
         elif "editor" in text_lower or "note" in text_lower or "markdown" in text_lower or "typing" in text_lower:
             result = "editor"
