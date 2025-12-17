@@ -7,12 +7,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from adk_agents import build_supervisor, supervise_with_adk
+from adk_agents import build_planner, build_supervisor, plan_with_adk, supervise_with_adk
 from adk_screen_classifier import build_screen_classifier, classify_screen
 from agents import Executor
-from agents.planner import Planner as FallbackPlanner
 from agents.supervisor import Supervisor as FallbackSupervisor
 
+from google.adk.agents import Agent
+from google.adk.models.lite_llm import LiteLlm
 
 def load_test_cases(path: Path) -> List[Dict[str, Any]]:
     data = json.loads(path.read_text())
@@ -48,12 +49,10 @@ def detect_state(adb_client, dump_path: Path, screenshot_path: Optional[Path] = 
     Heuristic state detection using uiautomator dump.
     Returns {"state": str, "dump_path": str} where state is one of:
     editor | vault_config | continue_prompt | vault_splash | unknown | other_app
+    Caller is responsible for taking the screenshot; we only attach its path.
     """
+    print(f"detect_state: {dump_path} {screenshot_path}")
     dump_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if screenshot_path:
-        screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-        adb_client.screenshot(screenshot_path)
 
     res = adb_client.dump_ui(dump_path)
     if res.get("status") != "ok":
@@ -103,6 +102,7 @@ def detect_state(adb_client, dump_path: Path, screenshot_path: Optional[Path] = 
             "screenshot_path": str(screenshot_path) if screenshot_path else None,
         }
     if "create a vault" in full_text and "existing vault" in full_text:
+        print(f"vault_splash: {full_text}")
         return {
             "state": "vault_splash",
             "dump_path": str(dump_path),
@@ -136,32 +136,82 @@ def capture_observation(adb_client, step_idx: int) -> Dict[str, Any]:
     adb_client.screenshot(ss_path)
     state_info = detect_state(adb_client, dump_path=dump_path, screenshot_path=ss_path)
     state_info["screenshot_path"] = str(ss_path)
+    state_info["dump_path"] = str(dump_path)
+    
+    # Extract clickable elements from UI dump for planner to see
+    try:
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(dump_path)
+        clickable_elements = []
+        for node in tree.iter():
+            if node.attrib.get("clickable") == "true" or node.attrib.get("text"):
+                text = node.attrib.get("text", "")
+                bounds = node.attrib.get("bounds", "")
+                resource_id = node.attrib.get("resource-id", "")
+                if text or resource_id:
+                    clickable_elements.append({
+                        "text": text,
+                        "bounds": bounds,
+                        "resource_id": resource_id
+                    })
+        if clickable_elements:
+            state_info["clickable_elements"] = clickable_elements[:10]  # Top 10 to avoid huge prompts
+    except Exception as e:
+        print(f"capture_observation: failed to parse UI dump: {e}")
+    
+    print(f"capture_observation: {state_info}")
     return state_info
 
 
-def decide_actions_for_state(state_label: str) -> List[Dict[str, Any]]:
+def resolve_test_cases_from_prompt(prompt: Optional[str], cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Deterministic actions per known screen.
+    If a free-form prompt is provided, attempt to route to a matching test case.
+    Fallback: synthesize a single ad-hoc test case using the prompt as description.
     """
-    actions: List[Dict[str, Any]] = []
-    if state_label == "create_vault_splash":
-        actions.append({"action": "tap", "detail": {"x": 520, "y": 1100}, "comment": "Tap 'Create a vault' center"})
-    elif state_label == "sync_dialog":
-        # Primary tap on measured center; fallback text tap if planner supports; here just coord.
-        actions.append({"action": "tap", "detail": {"x_norm": 0.5005, "y_norm": 0.6318}, "comment": "Tap 'Continue without sync' center"})
-    elif state_label == "storage_config":
-        actions.extend(
-            [
-                {"action": "tap", "detail": {"x_norm": 0.5005, "y_norm": 0.3030}, "comment": "Focus vault name field"},
-                {"action": "wait", "detail": {"seconds": 0.2}},
-                {"action": "input_text", "detail": {"text": "InternVault"}, "comment": "Enter vault name"},
-                {"action": "wait", "detail": {"seconds": 0.5}},
-                {"action": "tap", "detail": {"x_norm": 0.5005, "y_norm": 0.4123}, "comment": "Select Device storage"},
-                {"action": "wait", "detail": {"seconds": 0.5}},
-                {"action": "tap", "detail": {"x_norm": 0.5005, "y_norm": 0.7781}, "comment": "Tap final Create"},
-            ]
-        )
-    return actions
+    if not prompt:
+        return cases
+
+    prompt_lower = prompt.lower()
+    for case in cases:
+        if case.get("id", "").lower() in prompt_lower:
+            return [case]
+        if case.get("description", "").lower() in prompt_lower:
+            return [case]
+
+    return [
+        {
+            "id": "PROMPT",
+            "description": prompt,
+            "expected_outcome": "pass",
+            "notes": "Generated from --prompt input; ADK planner will derive steps.",
+        }
+    ]
+
+
+def sanitize_plan(plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Keep only executor-supported actions. Unknown actions are dropped to avoid failures.
+    """
+    supported = {
+        "start_app",
+        "stop_app",
+        "clear_app",
+        "tap",
+        "tap_text",
+        "swipe",
+        "input_text",
+        "keyevent",
+        "keycombination",
+        "wait",
+        "screenshot",
+        "dump_ui",
+    }
+    cleaned: List[Dict[str, Any]] = []
+    for step in plan or []:
+        action = step.get("action")
+        if action in supported:
+            cleaned.append(step)
+    return cleaned
 
 
 def main() -> None:
@@ -182,14 +232,27 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="gemini-2.5-flash",
-        help="Model name for ADK LlmAgent planner/supervisor.",
+        default="ollama/moondream",
+        help="Model name for ADK LlmAgent planner/supervisor (default: Moondream, fast lightweight vision model).",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="Natural language request to choose or synthesize a test case.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=4,
+        help="Maximum ADK planning/visual steps per test case.",
     )
     args = parser.parse_args()
 
-    cases = load_test_cases(args.tests)
+    cases = resolve_test_cases_from_prompt(args.prompt, load_test_cases(args.tests))
 
     # ADK agents
+    planner_agent = build_planner(model=args.model)
     screen_classifier = build_screen_classifier(model=args.model)
     supervisor_agent = build_supervisor(model=args.model)
 
@@ -200,64 +263,67 @@ def main() -> None:
     results: List[Dict[str, Any]] = []
 
     for case in cases:
-        # Always bootstrap the app.
-        executor.execute(
-            [
-                {
-                    "action": "start_app",
-                    "detail": {"package": "md.obsidian", "activity": ".MainActivity"},
-                    "comment": "Bootstrap: ensure Obsidian is launched.",
-                }
-            ],
-            case,
-            {},
-        )
-
+        history: List[Dict[str, Any]] = []
         execution_steps: List[Dict[str, Any]] = []
+        notes: List[str] = []
+        status = "ok"
+        last_observation: Dict[str, Any] = {"state": "bootstrap"}
 
-        # Step 1: observe and tap Create a vault (from obs_0).
-        obs0 = capture_observation(executor.adb, 0)
-        actions0 = [
-            {"action": "tap", "detail": {"x": 520, "y": 1100}, "comment": "Tap Create a vault (from obs_0 center)"},
-            {"action": "wait", "detail": {"seconds": 1}},
+        # Always bootstrap the app so the first visual observation is meaningful.
+        bootstrap_plan = [
+            {
+                "action": "start_app",
+                "detail": {"package": "md.obsidian", "activity": ".MainActivity"},
+                "comment": "Bootstrap: ensure Obsidian is launched.",
+            },
+            {"action": "wait", "detail": {"seconds": 3}, "comment": "Give the app time to render."},
         ]
-        exec0 = executor.execute(actions0, case, obs0)
-        execution_steps.extend(exec0.get("steps", []))
+        bootstrap_exec = executor.execute(bootstrap_plan, case, last_observation)
+        execution_steps.extend(bootstrap_exec.get("steps", []))
+        notes.extend(bootstrap_exec.get("notes", []))
+        if bootstrap_exec.get("status") != "ok":
+            status = "fail"
+        history.append({"observation": last_observation, "plan": bootstrap_plan, "execution": bootstrap_exec})
 
-        # Step 2: observe and tap Continue without sync (from obs_0 gray region).
-        obs1 = capture_observation(executor.adb, 1)
-        actions1 = [
-            {"action": "tap", "detail": {"x_norm": 0.4810, "y_norm": 0.5386}, "comment": "Tap Continue without sync (from obs_0 gray center)"},
-            {"action": "wait", "detail": {"seconds": 1}},
-        ]
-        exec1 = executor.execute(actions1, case, obs1)
-        execution_steps.extend(exec1.get("steps", []))
+        for step_idx in range(args.max_steps):
+            observation = capture_observation(executor.adb, step_idx)
+            observation["visual_state"] = classify_screen(screen_classifier, Path(observation["screenshot_path"]))
+            # If we confidently classify the screen, propagate it to state for planning.
+            if observation.get("visual_state") and observation["visual_state"] != "unknown":
+                observation["state"] = observation["visual_state"]
+            print(f"visual_state: {observation['visual_state']}")
+            print(
+                f"[obs {step_idx}] state={observation.get('state')} visual={observation.get('visual_state')} "
+                f"screenshot={observation.get('screenshot_path')} dump={observation.get('dump_path')}"
+            )
+            last_observation = observation
 
-        # Step 3: observe and fill storage config.
-        obs2 = capture_observation(executor.adb, 2)
-        actions2 = decide_actions_for_state("storage_config")
-        exec2 = executor.execute(actions2, case, obs2)
-        execution_steps.extend(exec2.get("steps", []))
+            # Ask the ADK planner for the next small set of steps, using visual context.
+            plan_raw = plan_with_adk(planner_agent, case, observation, history)
+            plan = sanitize_plan(plan_raw)
+            print(f"[planner {step_idx}] raw={plan_raw} sanitized={plan}")
 
-        # Step 4: observe and tap "USE THIS FOLDER" on permission screen.
-        obs3 = capture_observation(executor.adb, 3)
-        actions3 = [
-            {"action": "tap", "detail": {"x_norm": 0.4995, "y_norm": 0.9478}, "comment": "Tap USE THIS FOLDER (from obs_3 center)"},
-            {"action": "wait", "detail": {"seconds": 1}},
-        ]
-        exec3 = executor.execute(actions3, case, obs3)
-        execution_steps.extend(exec3.get("steps", []))
+            # If the planner produced nothing actionable, stop to avoid rule-based fallbacks.
+            if not plan:
+                status = "fail"
+                notes.append("Planner returned no actionable steps; stopping to avoid rule-based fallback.")
+                print(f"[planner {step_idx}] empty after sanitize; raw={plan_raw}")
+                break
 
-        # Step 5: observe and tap "Allow" on the next popup.
-        obs4 = capture_observation(executor.adb, 4)
-        actions4 = [
-            {"action": "tap", "detail": {"x": 878, "y": 1406}, "comment": "Tap Allow (from obs_4 dark region center)"},
-            {"action": "wait", "detail": {"seconds": 1}},
-        ]
-        exec4 = executor.execute(actions4, case, obs4)
-        execution_steps.extend(exec4.get("steps", []))
+            exec_result = executor.execute(plan, case, observation)
+            execution_steps.extend(exec_result.get("steps", []))
+            notes.extend(exec_result.get("notes", []))
+            history.append({"observation": observation, "plan": plan, "execution": exec_result})
 
-        execution = {"status": "ok", "steps": execution_steps, "notes": [], "observation": {}}
+            if exec_result.get("status") != "ok":
+                status = "fail"
+                break
+
+            # Stop early if we've reached the editor screen; vault creation should be done.
+            if observation.get("visual_state") == "editor":
+                break
+
+        execution = {"status": status, "steps": execution_steps, "notes": notes, "observation": last_observation}
 
         # Debug trace of steps with resolved coordinates if present.
         steps = execution.get("steps", [])
@@ -275,6 +341,9 @@ def main() -> None:
                 print(
                     f"  step {s.get('step_index')}: {s.get('action')} -> {s.get('result')}{resolved}"
                 )
+                stderr = s.get("stderr")
+                if stderr:
+                    print(f"    stderr: {stderr}")
 
         # Try ADK supervisor; fall back to rule-based if parsing fails.
         verdict = supervise_with_adk(supervisor_agent, case, execution)

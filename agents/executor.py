@@ -85,16 +85,28 @@ class Executor:
         except Exception as exc:  # noqa: BLE001
             return {"status": "error", "stderr": f"parse uidump failed: {exc}"}
 
+        def _norm(s: str) -> str:
+            # Lowercase and collapse all whitespace to single spaces for robust matching.
+            return " ".join(s.lower().split())
+
         target_bounds = None
-        target_text = text.lower()
-        for node in tree.iter():
-            node_text = (node.attrib.get("text") or "").lower()
-            node_desc = (node.attrib.get("content-desc") or "").lower()
-            if target_text in node_text or target_text in node_desc:
-                bounds = node.attrib.get("bounds")
-                if bounds:
-                    target_bounds = bounds
-                    break
+
+        def find_bounds(target: str) -> Optional[str]:
+            for node in tree.iter():
+                node_text = _norm(node.attrib.get("text") or "")
+                node_desc = _norm(node.attrib.get("content-desc") or "")
+                if target in node_text or target in node_desc:
+                    bounds = node.attrib.get("bounds")
+                    if bounds:
+                        return bounds
+            return None
+
+        target_text = _norm(text)
+        target_bounds = find_bounds(target_text)
+
+        # Fallback: common ADK planner variant "create new vault" vs UI "Create a vault".
+        if not target_bounds and target_text == "create new vault":
+            target_bounds = find_bounds("create a vault")
 
         if not target_bounds:
             return {"status": "error", "stderr": f"text '{text}' not found in UI dump"}
@@ -171,6 +183,10 @@ class Executor:
                 elif action == "screenshot":
                     output_path = detail.get("path")
                     result = self.adb.screenshot(Path(output_path))
+                elif action == "dump_ui":
+                    output_path = Path(detail.get("path", "artifacts/runtime_uidump.xml"))
+                    result = self._dump_ui(output_path)
+                    detail = {**detail, "path": str(output_path)}
                 elif action == "tap_text":
                     target = detail.get("text", "")
                     result = self._tap_text(str(target))
