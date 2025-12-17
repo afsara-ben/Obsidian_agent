@@ -5,6 +5,7 @@ An intelligent multi-agent system for automating Android UI interactions using v
 ## 🎯 Overview
 
 This project demonstrates a **hybrid AI approach** to Android UI automation:
+
 - **Vision AI** (Moondream via Ollama) for screen state detection
 - **Heuristic Planning** for reliable action generation
 - **ADB Integration** for device control
@@ -12,6 +13,7 @@ This project demonstrates a **hybrid AI approach** to Android UI automation:
 
 **Example Use Case:** Automates creating a vault in the Obsidian Android app - detecting screens, filling forms, and navigating through multiple UI states.
 
+https://github.com/user-attachments/assets/55b3bf7f-b972-4c0c-8169-67529ce429ec
 ## 🔑 Core Technologies
 
 - **Ollama** - Local LLM server hosting Moondream vision model
@@ -343,31 +345,3 @@ Obsidian_agent/
 - **Good Enough**: Adequate for screen classification
 - **Local**: No API costs, privacy preserved
 
-## 🔮 Future Enhancements
-
-- [ ] Add support for more apps (generic UI automation)
-- [ ] Self-learning heuristics (generate rules from vision model)
-- [ ] Better handling of dynamic UIs (animations, loading)
-- [ ] Multi-device parallel execution
-- [ ] Web dashboard for monitoring test runs
-- [ ] Screen recording for debugging failed tests
-
-## 📄 License
-
-MIT License - See LICENSE file for details
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Submit a pull request
-
-## 📧 Contact
-
-For questions or issues, please open a GitHub issue.
-
----
-
-**Built with ❤️ using Ollama, Python, and ADB**
